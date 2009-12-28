@@ -34,7 +34,7 @@
 								// to zero too often, this value may need to
 								// increase. Min 3, typical 8-24.
 								
-#define kAQBufSize 2048			// Number of bytes in each audio queue buffer
+#define kAQBufSize 4096			// Number of bytes in each audio queue buffer
 								// Needs to be big enough to hold a packet of
 								// audio from the audio file. If number is too
 								// large, queuing of audio before playback starts
@@ -72,6 +72,7 @@ typedef enum
 {
 	AS_NO_ERROR = 0,
 	AS_NETWORK_CONNECTION_FAILED,
+	AS_NETWORK_CONFIGURATION_FAILED,
 	AS_FILE_STREAM_GET_PROPERTY_FAILED,
 	AS_FILE_STREAM_SEEK_FAILED,
 	AS_FILE_STREAM_PARSE_BYTES_FAILED,
@@ -89,6 +90,7 @@ typedef enum
 	AS_AUDIO_QUEUE_DISPOSE_FAILED,
 	AS_AUDIO_QUEUE_STOP_FAILED,
 	AS_AUDIO_QUEUE_FLUSH_FAILED,
+	AS_AUDIO_QUEUE_RESET_FAILED,
 	AS_AUDIO_STREAMER_FAILED,
 	AS_GET_AUDIO_TIME_FAILED,
 	AS_AUDIO_BUFFER_TOO_SMALL
@@ -100,6 +102,28 @@ extern NSString * const ASStatusChangedNotification;
 {
 	NSURL *url;
 
+	id delegate;
+	
+	// called on the delegate when the metadata string is updated
+	SEL didUpdateMetaDataSelector;
+	
+	// called on the delegate when an error happens
+	SEL didErrorSelector;
+	
+	// called on the delegate when we receive a 302 redirect
+	SEL didRedirectSelector;
+	
+	// called on the delegate when we detect the stream bitrate
+	SEL didDetectBitrateSelector;
+	
+	BOOL redirect;
+	BOOL foundIcyStart;
+	BOOL foundIcyEnd;
+	BOOL parsedHeaders;
+	
+	NSMutableString *metaDataString;			// the metaDataString
+	NSString *streamContentType;				// the stream content-type from the http headers
+	
 	//
 	// Special threading consideration:
 	//	The audioQueue property should only ever be accessed inside a
@@ -116,6 +140,10 @@ extern NSString * const ASStatusChangedNotification;
 	bool inuse[kNumAQBufs];			// flags to indicate that a buffer is still in use
 	NSInteger buffersUsed;
 	
+	unsigned int metaDataInterval;					// how many data bytes between meta data
+	unsigned int metaDataBytesRemaining;	// how many bytes of metadata remain to be read
+	unsigned int dataBytesRead;							// how many bytes of data have been read
+
 	AudioStreamerState state;
 	AudioStreamerStopReason stopReason;
 	AudioStreamerErrorCode errorCode;
@@ -143,6 +171,19 @@ extern NSString * const ASStatusChangedNotification;
 @property (readonly) double progress;
 @property (readwrite) UInt32 bitRate;
 
+@property (nonatomic, retain) NSURL *url;
+@property BOOL redirect;
+@property BOOL foundIcyStart;
+@property BOOL foundIcyEnd;
+@property BOOL parsedHeaders;
+@property (nonatomic, copy) NSMutableString *metaDataString;
+@property (nonatomic, retain) NSString *streamContentType;
+@property (assign) id delegate;
+@property (assign) SEL didUpdateMetaDataSelector;
+@property (assign) SEL didErrorSelector;
+@property (assign) SEL didRedirectSelector;
+@property (assign) SEL didDetectBitrateSelector;
+
 - (id)initWithURL:(NSURL *)aURL;
 - (void)start;
 - (void)stop;
@@ -151,6 +192,21 @@ extern NSString * const ASStatusChangedNotification;
 - (BOOL)isPaused;
 - (BOOL)isWaiting;
 - (BOOL)isIdle;
+
+- (void)resetAudioQueue;
+- (void)restartAudioQueue;
+
+// Called when the metadata is updated - defaults to: @selector(metaDataUpdated:)
+- (void)updateMetaData:(NSString *)metaData;
+
+// Called when an error happens - defaults to: @selector(streamError:)
+- (void)audioStreamerError:(AudioStreamerErrorCode)anErrorCode;
+
+// Called when we receive a 302 redirect to another url
+- (void)redirectStreamError:(NSURL*)redirectURL;
+
+// Called when we detect the bitrate
+- (void)updateBitrate:(uint32_t)br;
 
 @end
 

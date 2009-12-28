@@ -5,6 +5,10 @@
 //  Created by Matt Gallagher on 27/09/08.
 //  Copyright 2008 Matt Gallagher. All rights reserved.
 //
+//  Modified by Mike Jablonski
+//
+//  Modified by Ed Anuff
+//
 //  Permission is given to use this source code file, free of charge, in any
 //  project, commercial or otherwise, entirely at your risk, with the condition
 //  that any redistribution (in part or whole) of source code must retain
@@ -35,11 +39,13 @@ NSString * const AS_AUDIO_QUEUE_BUFFER_MISMATCH_STRING = @"Audio queue buffers d
 NSString * const AS_AUDIO_QUEUE_DISPOSE_FAILED_STRING = @"Audio queue dispose failed.";
 NSString * const AS_AUDIO_QUEUE_PAUSE_FAILED_STRING = @"Audio queue pause failed.";
 NSString * const AS_AUDIO_QUEUE_STOP_FAILED_STRING = @"Audio queue stop failed.";
+NSString * const AS_AUDIO_QUEUE_RESET_FAILED_STRING = @"Audio queue reset failed.";
 NSString * const AS_AUDIO_DATA_NOT_FOUND_STRING = @"No audio data found.";
 NSString * const AS_AUDIO_QUEUE_FLUSH_FAILED_STRING = @"Audio queue flush failed.";
 NSString * const AS_GET_AUDIO_TIME_FAILED_STRING = @"Audio queue get current time failed.";
 NSString * const AS_AUDIO_STREAMER_FAILED_STRING = @"Audio playback failed";
 NSString * const AS_NETWORK_CONNECTION_FAILED_STRING = @"Network connection failed";
+NSString * const AS_NETWORK_CONFIGURATION_FAILED_STRING = @"Network configuration failed";
 NSString * const AS_AUDIO_BUFFER_TOO_SMALL_STRING = @"Audio packets are larger than kAQBufSize.";
 
 @interface AudioStreamer ()
@@ -211,6 +217,19 @@ void ASReadStreamCallBack
 @synthesize bitRate;
 @dynamic progress;
 
+@synthesize url;
+@synthesize redirect;
+@synthesize foundIcyStart;
+@synthesize foundIcyEnd;
+@synthesize parsedHeaders;
+@synthesize metaDataString;
+@synthesize streamContentType;
+@synthesize delegate;
+@synthesize didUpdateMetaDataSelector;
+@synthesize didErrorSelector;
+@synthesize didRedirectSelector;
+@synthesize didDetectBitrateSelector;
+
 //
 // initWithURL
 //
@@ -222,6 +241,13 @@ void ASReadStreamCallBack
 	if (self != nil)
 	{
 		url = [aURL retain];
+		metaDataString = [[NSMutableString alloc] initWithString:@""];
+		streamContentType = nil;
+		didUpdateMetaDataSelector = @selector(metaDataUpdated:);
+		didErrorSelector = @selector(streamError:);
+		didRedirectSelector = @selector(streamRedirect:);
+		didDetectBitrateSelector = @selector(bitRateUpdated:);
+		delegate = nil;
 	}
 	return self;
 }
@@ -236,6 +262,7 @@ void ASReadStreamCallBack
 	[self stop];
 	[notificationCenter release];
 	[url release];
+	[metaDataString release];
 	[super dealloc];
 }
 
@@ -332,8 +359,12 @@ void ASReadStreamCallBack
 			return AS_GET_AUDIO_TIME_FAILED_STRING;
 		case AS_NETWORK_CONNECTION_FAILED:
 			return AS_NETWORK_CONNECTION_FAILED_STRING;
+		case AS_NETWORK_CONFIGURATION_FAILED:
+			return AS_NETWORK_CONFIGURATION_FAILED_STRING;
 		case AS_AUDIO_QUEUE_STOP_FAILED:
 			return AS_AUDIO_QUEUE_STOP_FAILED_STRING;
+		case AS_AUDIO_QUEUE_RESET_FAILED:
+			return AS_AUDIO_QUEUE_RESET_FAILED_STRING;
 		case AS_AUDIO_STREAMER_FAILED:
 			return AS_AUDIO_STREAMER_FAILED_STRING;
 		case AS_AUDIO_BUFFER_TOO_SMALL:
@@ -386,7 +417,10 @@ void ASReadStreamCallBack
 			stopReason = AS_STOPPING_ERROR;
 			AudioQueueStop(audioQueue, true);
 		}
+		
+		[self audioStreamerError:anErrorCode];
 
+#ifndef AS_NO_ALERT_ON_ERROR
 #ifdef TARGET_OS_IPHONE			
 		UIAlertView *alert =
 			[[[UIAlertView alloc]
@@ -414,6 +448,7 @@ void ASReadStreamCallBack
 			onThread:[NSThread mainThread]
 			withObject:nil
 			waitUntilDone:NO];
+#endif
 #endif
 	}
 }
@@ -586,6 +621,7 @@ void ASReadStreamCallBack
 		// Create the GET request
 		//
 		CFHTTPMessageRef message= CFHTTPMessageCreateRequest(NULL, (CFStringRef)@"GET", (CFURLRef)url, kCFHTTPVersion1_1);
+	   	CFHTTPMessageSetHeaderFieldValue(message, CFSTR("Icy-MetaData"), CFSTR("1"));
 		stream = CFReadStreamCreateForHTTPRequest(NULL, message);
 		CFRelease(message);
 		
@@ -597,20 +633,23 @@ void ASReadStreamCallBack
 			kCFStreamPropertyHTTPShouldAutoredirect,
 			kCFBooleanTrue) == false)
 		{
+#ifndef AS_NO_ALERT_ON_ERROR
 #ifdef TARGET_OS_IPHONE
-			UIAlertView *alert =
-				[[UIAlertView alloc]
-					initWithTitle:NSLocalizedStringFromTable(@"File Error", @"Errors", nil)
-					message:NSLocalizedStringFromTable(@"Unable to configure network read stream.", @"Errors", nil)
-					delegate:self
-					cancelButtonTitle:@"OK"
-					otherButtonTitles: nil];
-			[alert
-				performSelector:@selector(show)
-				onThread:[NSThread mainThread]
-				withObject:nil
-				waitUntilDone:YES];
-			[alert release];
+			/*
+			 UIAlertView *alert =
+			 [[UIAlertView alloc]
+			 initWithTitle:NSLocalizedStringFromTable(@"File Error", @"Errors", nil)
+			 message:NSLocalizedStringFromTable(@"Unable to configure network read stream.", @"Errors", nil)
+			 delegate:self
+			 cancelButtonTitle:@"OK"
+			 otherButtonTitles: nil];
+			 [alert
+			 performSelector:@selector(show)
+			 onThread:[NSThread mainThread]
+			 withObject:nil
+			 waitUntilDone:YES];
+			 [alert release];
+			 */
 #else
 		NSAlert *alert =
 			[NSAlert
@@ -625,6 +664,15 @@ void ASReadStreamCallBack
 			withObject:nil
 			waitUntilDone:NO];
 #endif
+#endif
+			if (redirect)
+			{
+				[self redirectStreamError:url];
+			}
+			else
+			{
+				[self audioStreamerError:AS_NETWORK_CONNECTION_FAILED];
+			}
 			return NO;
 		}
 		
@@ -652,6 +700,7 @@ void ASReadStreamCallBack
 		if (!CFReadStreamOpen(stream))
 		{
 			CFRelease(stream);
+#ifndef AS_NO_ALERT_ON_ERROR
 #ifdef TARGET_OS_IPHONE
 			UIAlertView *alert =
 				[[UIAlertView alloc]
@@ -680,6 +729,8 @@ void ASReadStreamCallBack
 			withObject:nil
 			waitUntilDone:NO];
 #endif
+#endif
+			[self audioStreamerError:AS_NETWORK_CONFIGURATION_FAILED];
 			return NO;
 		}
 		
@@ -857,6 +908,40 @@ cleanup:
 	[pool release];
 }
 
+// Subclasses can override this method to perform handling in the same thread
+// If not overidden, it will call the didUpdateMetaDataSelector on the delegate (by default metaDataUpdated:)`
+- (void)updateMetaData:(NSString *)metaData
+{
+	if (didUpdateMetaDataSelector && [delegate respondsToSelector:didUpdateMetaDataSelector]) {
+		[delegate performSelectorOnMainThread:didUpdateMetaDataSelector withObject:metaData waitUntilDone:YES];		
+	}
+}
+
+- (void)audioStreamerError:(AudioStreamerErrorCode)anErrorCode
+{
+	if (didErrorSelector && [delegate respondsToSelector:didErrorSelector]) {
+		[delegate performSelectorOnMainThread:didErrorSelector withObject:[NSNumber numberWithInt:anErrorCode] waitUntilDone:YES];
+	}
+}
+
+- (void)redirectStreamError:(NSURL*)redirectURL;
+{
+	if (didRedirectSelector && [delegate respondsToSelector:didRedirectSelector]) {
+		[delegate performSelectorOnMainThread:didRedirectSelector withObject:redirectURL waitUntilDone:YES];
+	}
+}
+
+- (void)updateBitrate:(uint32_t)br {
+	// keep the format consistant
+	if (br < 1000) {
+		br = br * 1000;
+	}
+	
+	if (didDetectBitrateSelector && [delegate respondsToSelector:didDetectBitrateSelector]) {
+		[delegate performSelectorOnMainThread:didDetectBitrateSelector withObject:[NSNumber numberWithInt:br] waitUntilDone:YES];
+	}
+}
+
 //
 // start
 //
@@ -974,6 +1059,63 @@ cleanup:
 		}
 	}
 	return NO;
+}
+
+- (void)resetAudioQueue
+{
+	err = AudioFileStreamClose(audioFileStream);
+	if (err)
+	{
+		[self failWithErrorCode:AS_FILE_STREAM_CLOSE_FAILED];
+		return;
+	}
+	
+	//pthread_mutex_lock(&mutex2);
+	// Stop the Audio Queue
+	err = AudioQueueStop(audioQueue, true);
+	if (err)
+	{
+		[self failWithErrorCode:AS_AUDIO_QUEUE_STOP_FAILED];
+		return;
+	}
+	//pthread_mutex_unlock(&mutex2);
+	
+	err = AudioQueueReset(audioQueue);
+	if (err)
+	{ 
+		[self failWithErrorCode:AS_AUDIO_QUEUE_RESET_FAILED];
+		return;
+	}
+	
+	for (int i = 0; i < kNumAQBufs; ++i) {
+        AudioQueueFreeBuffer(audioQueue, audioQueueBuffer[i]);
+	}
+}
+
+- (void)restartAudioQueue
+{
+	[self resetAudioQueue];
+	
+	AudioFileTypeID fileTypeHint = kAudioFileMP3Type;	// default to mp3
+	if (streamContentType)
+	{
+		NSLog(@"Audio Type Hint: %@", streamContentType);
+		if ([streamContentType isEqual:@"audio/aac"])
+		{
+			fileTypeHint = kAudioFileAAC_ADTSType;
+		}
+		else if ([streamContentType isEqual:@"audio/aacp"])
+		{
+			fileTypeHint = kAudioFileAAC_ADTSType;
+		}
+	}
+	
+	// create an audio file stream parser
+	err = AudioFileStreamOpen(self, MyPropertyListenerProc, MyPacketsProc, 
+									   fileTypeHint, &audioFileStream);
+	if (err) {
+		[self failWithErrorCode:AS_FILE_STREAM_OPEN_FAILED];
+	}
 }
 
 //
@@ -1097,7 +1239,9 @@ cleanup:
 	else if (eventType == kCFStreamEventHasBytesAvailable)
 	{
 		UInt8 bytes[kAQBufSize];
+		UInt8 bytesNoMetaData[kAQBufSize];
 		CFIndex length;
+		int lengthNoMetaData = 0;
 		@synchronized(self)
 		{
 			if ([self isFinishing])
@@ -1121,23 +1265,267 @@ cleanup:
 				return;
 			}
 		}
-
-		if (discontinuous)
+		
+		//
+		// Parse the bytes read by sending them through the AudioFileStream
+		//
+		if (length > 0)
 		{
-			err = AudioFileStreamParseBytes(audioFileStream, length, bytes, kAudioFileStreamParseFlag_Discontinuity);
-			if (err)
+			int streamStart = 0;
+			
+			// Read the HTTP response and get the meta data interval
+			if (metaDataInterval == 0)
 			{
-				[self failWithErrorCode:AS_FILE_STREAM_PARSE_BYTES_FAILED];
-				return;
+				CFHTTPMessageRef myResponse = (CFHTTPMessageRef)CFReadStreamCopyProperty(stream, kCFStreamPropertyHTTPResponseHeader);
+				UInt32 statusCode = CFHTTPMessageGetResponseStatusCode(myResponse);
+				
+				//CFStringRef myStatusLine = CFHTTPMessageCopyResponseStatusLine(myResponse);
+				
+				if (statusCode == 200)		// "OK" (this is true even for ICY)
+				{
+					// check if this is a ICY 200 OK response
+					NSString *icyCheck = [[[NSString alloc] initWithBytes:bytes length:10 encoding:NSUTF8StringEncoding] autorelease];
+					if (icyCheck != nil && [icyCheck caseInsensitiveCompare:@"ICY 200 OK"] == NSOrderedSame)	
+					{
+						foundIcyStart = YES;
+						NSLog(@"ICY 200 OK");
+					}
+					else
+					{
+						// Not an ICY response
+						NSString *metaInt;
+						NSString *contentType;
+						NSString *icyBr;
+						metaInt = (NSString *) CFHTTPMessageCopyHeaderFieldValue(myResponse, CFSTR("Icy-Metaint"));
+						contentType = (NSString *) CFHTTPMessageCopyHeaderFieldValue(myResponse, CFSTR("Content-Type"));
+						icyBr = (NSString *) CFHTTPMessageCopyHeaderFieldValue(myResponse, CFSTR("icy-br"));
+						
+						if (contentType) 
+						{
+							// only if we haven't already set a content-type
+							if (!streamContentType)
+							{
+								NSLog(@"Stream Content-Type: %@", contentType);
+								streamContentType = contentType;
+								// if this is not an mp3 stream we need to restart the audio queue
+								if ([streamContentType caseInsensitiveCompare:@"audio/mpeg"] != NSOrderedSame)
+								{
+									[self restartAudioQueue];
+								}								
+							}
+						}
+						
+						if (bitRate == 0 && icyBr)
+						{
+							bitRate = [icyBr intValue];
+							NSLog(@"Stream Bitrate: %@", icyBr);
+							[self updateBitrate:[icyBr intValue]];
+						}
+						
+						metaDataInterval = [metaInt intValue];
+						if (metaInt)
+						{
+							NSLog(@"MetaInt: %@", metaInt);
+							parsedHeaders = YES;
+						}
+					}
+				}
+				else if (statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307)
+				{
+					// Redirect!
+					redirect = YES;
+					NSLog(@"Redirect to another URL.");
+					
+					NSString *escapedValue =
+					[(NSString *)CFURLCreateStringByAddingPercentEscapes(
+																		 nil,
+																		 CFHTTPMessageCopyHeaderFieldValue(myResponse, CFSTR("Location")),
+																		 NULL,
+																		 NULL,
+																		 kCFStringEncodingUTF8)
+					 autorelease];
+					
+					url = [NSURL URLWithString:escapedValue];
+					// alert interested parties
+					[self redirectStreamError:url];
+					[self failWithErrorCode:AS_NETWORK_CONNECTION_FAILED];
+				}
+				else
+				{
+					// Invalid
+				}
 			}
-		}
-		else
-		{
-			err = AudioFileStreamParseBytes(audioFileStream, length, bytes, 0);
-			if (err)
+			
+			if (foundIcyStart && !foundIcyEnd)
 			{
-				[self failWithErrorCode:AS_FILE_STREAM_PARSE_BYTES_FAILED];
-				return;
+				char c1 = '\0';
+				char c2 = '\0';
+				char c3 = '\0';
+				char c4 = '\0';
+				int lineStart = streamStart;
+				while (YES)
+				{
+					if (streamStart + 3 > length)
+					{
+						break;
+					}
+					
+					c1 = bytes[streamStart];
+					c2 = bytes[streamStart+1];
+					c3 = bytes[streamStart+2];
+					c4 = bytes[streamStart+3];
+					
+					if (c1 == '\r' && c2 == '\n')
+					{		
+						// get the full string
+						NSString *fullString = [[[NSString alloc] initWithBytes:bytes length:streamStart encoding:NSUTF8StringEncoding] autorelease];
+						
+						// get the substring for this line
+						NSString *line = [fullString substringWithRange:NSMakeRange(lineStart, (streamStart-lineStart))];
+						NSLog(@"Header Line: %@. Length: %d", line, [line length]);
+						
+						// check if this is icy-metaint
+						NSArray *lineItems = [line componentsSeparatedByString:@":"];
+						if ([lineItems count] > 1)
+						{
+							if ([[lineItems objectAtIndex:0] caseInsensitiveCompare:@"icy-metaint"] == NSOrderedSame)
+							{
+								metaDataInterval = [[lineItems objectAtIndex:1] intValue];
+								NSLog(@"ICY MetaInt: %d", metaDataInterval);
+							}
+							if ([[lineItems objectAtIndex:0] caseInsensitiveCompare:@"icy-br"] == NSOrderedSame)
+							{
+								uint32_t icybr = [[lineItems objectAtIndex:1] intValue];
+								if (bitRate == 0) {
+									bitRate = icybr;
+									NSLog(@"ICY BR: %d", icybr);
+									[self updateBitrate:icybr];										
+								}
+							}
+							if ([[lineItems objectAtIndex:0] caseInsensitiveCompare:@"Content-Type"] == NSOrderedSame)
+							{
+								NSLog(@"ICY Stream Content-Type: %@", [lineItems objectAtIndex:1]);
+								// only if we haven't already set the content type
+								if (!streamContentType)
+								{
+									streamContentType = [lineItems objectAtIndex:1];
+									// if this is not an mp3 stream we need to restart the audio queue
+									if ([streamContentType caseInsensitiveCompare:@"audio/mpeg"] != NSOrderedSame)
+									{
+										[self restartAudioQueue];
+									}										
+								}
+							}
+						}
+						
+						// this is the end of a line, the new line starts in 2
+						lineStart = streamStart+2; // (c3)
+						
+						if (c3 == '\r' && c4 == '\n')
+						{
+							foundIcyEnd = YES;
+							break;
+						}
+					}
+					
+					streamStart++;
+				} // end while
+				
+				if (foundIcyEnd)
+				{
+					streamStart = streamStart + 4;
+					NSLog(@"Found End.");	
+					parsedHeaders = YES;
+				}
+			}
+			
+			if (parsedHeaders)
+			{
+				// look at each byte
+				for (int i=streamStart; i < length; i++)
+				{
+					// is this a metadata byte?
+					if (metaDataBytesRemaining > 0)
+					{
+						//NSLog(@"meta: %C", bytes[i]);
+						[metaDataString appendFormat:@"%C", bytes[i]];
+						
+						metaDataBytesRemaining -= 1;
+						
+						if (metaDataBytesRemaining == 0)
+						{
+							NSLog(@"MetaData: %@.", metaDataString);
+							[self updateMetaData:metaDataString];
+							
+							dataBytesRead = 0;
+						}
+						continue;
+					}
+					
+					// is this the interval byte?
+					if (metaDataInterval > 0 && dataBytesRead == metaDataInterval)
+					{
+						metaDataBytesRemaining = bytes[i] * 16;
+						//NSLog(@"Found interval. Interval: %d, Meta Length: %d", metaDataInterval, metaDataBytesRemaining);
+						
+						[metaDataString setString:@""];
+						
+						if (metaDataBytesRemaining == 0)
+						{
+							dataBytesRead = 0;
+						}
+						else
+						{
+							NSLog(@"Found interval. Meta Length: %d", metaDataBytesRemaining);
+						}
+						
+						continue;
+					}
+					
+					// this is a data byte
+					dataBytesRead += 1;
+					
+					// copy the data to the new buffer
+					bytesNoMetaData[lengthNoMetaData] = bytes[i];
+					lengthNoMetaData += 1;
+				} // end for
+				
+			}	// end if parsedHeaders
+			
+			
+			if (discontinuous)
+			{
+				/*
+				 * SHOUTcast can send the interval byte by itself. In that case lengthNoMetaData is 0, but
+				 * the interval byte should not be sent to the audio queue. The check for a metaDataInterval == 0
+				 * will make sure that we don't ever send in the interval byte on a stream with metadata
+				 */
+				
+				if (lengthNoMetaData > 0)
+				{
+					//NSLog(@"Parsing no meta bytes (Discontinuous).");
+					err = AudioFileStreamParseBytes(audioFileStream, lengthNoMetaData, bytesNoMetaData, kAudioFileStreamParseFlag_Discontinuity);
+					if (err) [self failWithErrorCode:AS_FILE_STREAM_PARSE_BYTES_FAILED];
+				}
+				else if (metaDataInterval == 0)	// make sure this isn't a stream with metadata
+				{
+					err = AudioFileStreamParseBytes(audioFileStream, length, bytes, kAudioFileStreamParseFlag_Discontinuity);
+					if (err) [self failWithErrorCode:AS_FILE_STREAM_PARSE_BYTES_FAILED];
+				}
+			}
+			else
+			{
+				if (lengthNoMetaData > 0)
+				{
+					//NSLog(@"Parsing no meta bytes.");
+					err = AudioFileStreamParseBytes(audioFileStream, lengthNoMetaData, bytesNoMetaData, 0);
+					if (err) [self failWithErrorCode:AS_FILE_STREAM_PARSE_BYTES_FAILED];
+				}
+				else if (metaDataInterval == 0)
+				{
+					err = AudioFileStreamParseBytes(audioFileStream, length, bytes, 0);
+					if (err) [self failWithErrorCode:AS_FILE_STREAM_PARSE_BYTES_FAILED];
+				}
 			}
 		}
 	}
@@ -1261,6 +1649,10 @@ cleanup:
 		{
 			discontinuous = true;
 			
+			// get the cookie size
+			UInt32 cookieSize;
+			Boolean writable;
+			
 			AudioStreamBasicDescription asbd;
 			UInt32 asbdSize = sizeof(asbd);
 			
@@ -1273,6 +1665,56 @@ cleanup:
 			}
 			
 			sampleRate = asbd.mSampleRate;
+			
+			//
+			// http://blog.stormyprods.com/2009/10/supporting-aac-via-iphone-sdk.html
+			//
+			UInt32 formatListSize;
+			err = AudioFileStreamGetPropertyInfo(inAudioFileStream, kAudioFileStreamProperty_FormatList, &formatListSize, &writable);
+			if (!err)
+			{
+				NSLog(@"formatListSize %d\n", formatListSize);
+				
+				// get the FormatList data
+				void* formatListData = calloc(1, formatListSize);
+				err = AudioFileStreamGetProperty(inAudioFileStream, kAudioFileStreamProperty_FormatList, &formatListSize, formatListData);
+				if (err) { 
+					[self failWithErrorCode:AS_FILE_STREAM_GET_PROPERTY_FAILED];
+					free(formatListData); 
+					return;
+				}
+				
+				// Scan through all the supported formats and look for HE AAC
+				for (int x = 0; x < formatListSize; x += sizeof(AudioFormatListItem))
+				{
+					AudioStreamBasicDescription *pasbd = formatListData + x;
+					
+					NSLog(@"rate: %lf  Format:%c%c%c%c  FramesPerPacket:%d  bytesPerFrame:%d ChannelsperFrame:%d\r\n",
+						  pasbd->mSampleRate, (pasbd->mFormatID>>24)&255, (pasbd->mFormatID>>16)&255, (pasbd->mFormatID>>8)&255, (pasbd->mFormatID)&255,
+						  pasbd->mFramesPerPacket, pasbd->mBytesPerFrame, pasbd->mChannelsPerFrame);
+					
+					if (pasbd->mFormatID == kAudioFormatMPEG4AAC_HE)
+					{
+						NSLog(@"Found HE AAC!");
+						// HE AAC isn't supported on the simulator for some reason
+#ifndef TARGET_IPHONE_SIMULATOR
+						NSLog(@"AAC memcpy");
+						memcpy(&asbd, pasbd, sizeof(asbd));
+#endif
+						break;
+					}
+				}
+				free(formatListData);
+			}	
+			
+			
+			NSLog(@"Format:%c%c%c%c\r\n",
+				  (asbd.mFormatID>>24)&255, (asbd.mFormatID>>16)&255, (asbd.mFormatID>>8)&255, (asbd.mFormatID)&255);
+			
+			if (asbd.mFormatID == kAudioFormatMPEGLayer1)
+			{
+				NSLog(@"------ Unexpected MP1 format found! Usually means wrong format detected. ---------"); 
+			}
 			
 			// create the audio queue
 			err = AudioQueueNewOutput(&asbd, MyAudioQueueOutputCallback, self, NULL, NULL, 0, &audioQueue);
@@ -1301,10 +1743,7 @@ cleanup:
 					return;
 				}
 			}
-
-			// get the cookie size
-			UInt32 cookieSize;
-			Boolean writable;
+			
 			OSStatus ignorableError;
 			ignorableError = AudioFileStreamGetPropertyInfo(inAudioFileStream, kAudioFileStreamProperty_MagicCookieData, &cookieSize, &writable);
 			if (ignorableError)
