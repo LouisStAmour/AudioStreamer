@@ -1072,24 +1072,29 @@ cleanup:
 	
 	//pthread_mutex_lock(&mutex2);
 	// Stop the Audio Queue
-	err = AudioQueueStop(audioQueue, true);
-	if (err)
+	if (audioQueue &&
+		(state == AS_PLAYING || state == AS_PAUSED ||
+		 state == AS_BUFFERING || state == AS_WAITING_FOR_QUEUE_TO_START))
 	{
-		[self failWithErrorCode:AS_AUDIO_QUEUE_STOP_FAILED];
-		return;
+		err = AudioQueueStop(audioQueue, true);
+		if (err)
+		{
+			[self failWithErrorCode:AS_AUDIO_QUEUE_STOP_FAILED];
+			return;
+		}
+		
+		err = AudioQueueReset(audioQueue);
+		if (err)
+		{ 
+			[self failWithErrorCode:AS_AUDIO_QUEUE_RESET_FAILED];
+			return;
+		}
+		
+		for (int i = 0; i < kNumAQBufs; ++i) {
+			AudioQueueFreeBuffer(audioQueue, audioQueueBuffer[i]);
+		}
 	}
 	//pthread_mutex_unlock(&mutex2);
-	
-	err = AudioQueueReset(audioQueue);
-	if (err)
-	{ 
-		[self failWithErrorCode:AS_AUDIO_QUEUE_RESET_FAILED];
-		return;
-	}
-	
-	for (int i = 0; i < kNumAQBufs; ++i) {
-        AudioQueueFreeBuffer(audioQueue, audioQueueBuffer[i]);
-	}
 }
 
 - (void)restartAudioQueue
