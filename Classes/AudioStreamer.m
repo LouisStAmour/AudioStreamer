@@ -1190,6 +1190,7 @@ cleanup:
 		//
 		if (bytesFilled)
 		{
+			self.state = AS_FLUSHING_EOF;
 			[self enqueueBuffer];
 		}
 
@@ -1576,6 +1577,7 @@ cleanup:
 		
 		if (state == AS_BUFFERING ||
 			state == AS_WAITING_FOR_DATA ||
+			state == AS_FLUSHING_EOF ||
 			(state == AS_STOPPED && stopReason == AS_STOPPING_TEMPORARILY))
 		{
 			//
@@ -1583,7 +1585,7 @@ cleanup:
 			// AudioFileStream stays a small amount ahead of the AudioQueue to
 			// avoid an audio glitch playing streaming files on iPhone SDKs < 3.0
 			//
-			if (buffersUsed == kNumAQBufs - 1)
+			if (state == AS_FLUSHING_EOF || buffersUsed == kNumAQBufs - 1)
 			{
 				if (self.state == AS_BUFFERING)
 				{
@@ -2081,6 +2083,7 @@ cleanup:
 	}
 	else if (inInterruptionState == kAudioSessionEndInterruption)
 	{
+		AudioSessionSetActive( true );
 		[self pause];
 	}
 }
